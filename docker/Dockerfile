@@ -1,7 +1,7 @@
 # based on https://mitchellh.com/writing/nix-with-dockerfiles
 
 # Nix builder
-FROM nixos/nix:latest AS builder
+FROM dockerhub.timeweb.cloud/nixos/nix:latest AS builder
 
 # Copy our source and setup our working dir.
 COPY . /tmp/build
@@ -24,7 +24,7 @@ RUN cp -R $(nix-store -qR result/) /tmp/nix-store-closure \
 
 # Final image is based on chainguard/static. We copy Nix dependencies
 # but they're fully self-contained so we don't need Nix anymore.
-FROM cgr.dev/chainguard/static:latest
+FROM dockerhub.timeweb.cloud/chainguard/static:latest
 
 WORKDIR /app
 

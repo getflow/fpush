@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use crate::config::fpush_config::FpushConfig;
 use crate::xmpp::error_messages::send_wait_iq_reason_old_prosody;
 use crate::{
@@ -11,8 +13,9 @@ use log::{debug, error, info, warn};
 
 use tokio::sync::mpsc;
 use tokio_xmpp::connect::{DnsConfig, TcpServerConnector};
-use tokio_xmpp::Component;
-use xmpp::agent::Element;
+use tokio_xmpp::{Component, Stanza};
+use tokio_xmpp::xmlstream::Timeouts;
+use xmpp::minidom::Element;
 use xmpp_parsers::disco::DiscoInfoResult;
 use xmpp_parsers::{iq::Iq, jid::Jid, pubsub::PubSub};
 
@@ -26,6 +29,7 @@ pub(crate) async fn init_component_connection(
             config.component().server_hostname(),
             *config.component().server_port(),
         ),
+        Timeouts::tight(),
     )
     .await?;
 
@@ -77,7 +81,7 @@ pub(crate) async fn message_loop_main_thread(
 fn dispatch_xmpp_msg_to_thread(
     conn: &mpsc::Sender<Iq>,
     push_modules: FpushPushArc,
-    stanza: Element,
+    stanza: Stanza,
 ) {
     let conn_to_master = conn.clone();
     tokio::spawn(async move {
@@ -86,22 +90,22 @@ fn dispatch_xmpp_msg_to_thread(
 }
 
 #[inline(always)]
-async fn handle_iq(conn: &mpsc::Sender<Iq>, push_modules: FpushPushArc, stanza: Element) {
+async fn handle_iq(conn: &mpsc::Sender<Iq>, push_modules: FpushPushArc, stanza: Stanza) {
     // parse message
     match Iq::try_from(stanza) {
-        Err(e) => {
-            debug!("Could not parse stanza: {}", e);
+        Err(_) => {
+            debug!("Could not parse stanza");
         }
         Ok(iq) => {
-            let (to, from, iq_payload) = match (iq.to, iq.from, iq.payload) {
-                (Some(to), Some(from), xmpp_parsers::iq::IqType::Set(iq_payload)) => {
+            let (to, from, iq_payload) = match (iq.to(), iq.from(), iq.clone().into_payload()) {
+                (Some(to), Some(from), xmpp_parsers::iq::IqPayload::Set(iq_payload)) => {
                     (to, from, iq_payload)
                 }
-                (Some(to), Some(from), xmpp_parsers::iq::IqType::Get(iq_payload)) => {
+                (Some(to), Some(from), xmpp_parsers::iq::IqPayload::Get(iq_payload)) => {
                     if iq_payload.name() == "query" {
                         // handle disco
                         if xmpp_parsers::disco::DiscoInfoQuery::try_from(iq_payload).is_err() {
-                            send_error_iq(conn, &iq.id, from, to).await;
+                            send_error_iq(conn, &iq.id(), from.clone(), to.clone()).await;
                             return;
                         }
                         info!("Handling disco info request from: {}", from);
@@ -109,16 +113,16 @@ async fn handle_iq(conn: &mpsc::Sender<Iq>, push_modules: FpushPushArc, stanza: 
                         let disco_info_result = DiscoInfoResult {
                             node: None,
                             identities: vec![],
-                            features: vec![xmpp_parsers::disco::Feature::new(
-                                "urn:xmpp:serverinfo:0",
-                            )],
+                            features: BTreeSet::from([
+                                "urn:xmpp:serverinfo:0".to_string(),
+                            ]),
                             extensions: vec![],
                         };
                         if let Err(e) = conn
                             .send(
-                                Iq::from_result(iq.id.to_owned(), Some(disco_info_result))
-                                    .with_from(to)
-                                    .with_to(from),
+                                Iq::from_result(iq.id().to_owned(), Some(disco_info_result))
+                                    .with_from(to.clone())
+                                    .with_to(from.clone()),
                             )
                             .await
                         {
@@ -129,15 +133,15 @@ async fn handle_iq(conn: &mpsc::Sender<Iq>, push_modules: FpushPushArc, stanza: 
                         }
                     } else if iq_payload.name() == "ping" {
                         info!("Received ping from {}", from);
-                        send_ack_iq(conn, &iq.id, from, to).await;
+                        send_ack_iq(conn, &iq.id(), from.clone(), to.clone()).await;
                     } else {
-                        send_error_iq(conn, &iq.id, from, to).await;
+                        send_error_iq(conn, &iq.id(), from.clone(), to.clone()).await;
                     }
                     return;
                 }
                 (Some(to), Some(from), _) => {
                     info!("Received unhandled iq from {}", from);
-                    send_error_iq(conn, &iq.id, from, to).await;
+                    send_error_iq(conn, &iq.id(), from.clone(), to.clone()).await;
                     return;
                 }
                 (_, None, _) => {
@@ -155,7 +159,7 @@ async fn handle_iq(conn: &mpsc::Sender<Iq>, push_modules: FpushPushArc, stanza: 
                         "Could not retrieve token or module_id: {} source: {}",
                         e, from
                     );
-                    send_wait_iq_reason_old_prosody(conn, &iq.id, from, to).await;
+                    send_wait_iq_reason_old_prosody(conn, &iq.id(), from.clone(), to.clone()).await;
                     return;
                 }
             };
@@ -165,7 +169,7 @@ async fn handle_iq(conn: &mpsc::Sender<Iq>, push_modules: FpushPushArc, stanza: 
             );
             // handle_push_request
             let push_result = push_modules.push(&module_id, token.clone()).await;
-            handle_push_result(conn, &module_id, &token, &push_result, from, to, iq.id).await
+            handle_push_result(conn, &module_id, &token, &push_result, from.clone(), to.clone(), iq.clone().id().to_string()).await
         }
     }
 }
